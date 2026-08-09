@@ -108,3 +108,4 @@ Ek yol için `~/.config/iiup/paths.list` veya config’de `BACKUP_EXTRA`.
 ## Lisans
 
 Kişisel / MIT — istediğin gibi kullan, fork’la, paylaş.
+# iiup
