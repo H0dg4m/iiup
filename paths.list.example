@@ -1,5 +1,6 @@
-# iiup ekstra yedek yolları (isteğe bağlı)
-# Satır başına bir yol; ~ ve $HOME kullanılabilir.
+# Güncellemeden önce yedeklenecek yollar (satır başına bir)
+# ~ veya $HOME kullanılabilir. Boş bırakılabilir.
 
+# $HOME/.config/hypr/custom
 # $HOME/.config/kitty
-# $HOME/.config/fish/config.fish
+# $HOME/.config/fish
