@@ -1,111 +1,223 @@
 # iiup
 
-**illogical-impulse / [dots-hyprland](https://github.com/end-4/dots-hyprland)** için güvenli güncelleyici.
+Git tabanlı **dotfiles** için güvenli güncelleyici.
 
-Güncellemeden önce kişisel config’leri yedekler, upstream’te yeni sürüm yoksa boşuna kurulum çalıştırmaz, günlük otomatik kontrol ile haber verir.
+Belirli bir rice’a veya projeye bağlı değildir. Takip edilecek repo’yu **sen** seçersin — kendi dots’un, bir fork, başka birinin public rice’ı… hepsi olur.
 
-## Ne yapar?
+**Ne yapar?**
 
 1. Upstream’te yeni commit var mı bakar  
-2. Varsa: yedek alır → `git pull` → `./setup`  
-3. Sen bir süre kullanırsın  
-4. Sorun yoksa `iiup ok` ile yedeği siler; bozulursa `iiup restore`
+2. Varsa, senin seçtiğin dosyaları yedekler  
+3. `git pull` (+ isteğe bağlı kurulum komutu) çalıştırır  
+4. Beğenmezsen yedeği geri yüklersin; beğenirsen yedeği silersin  
+
+Upstream yoksa kurulum komutu **çalışmaz** — gereksiz yeniden kurulum yok.
+
+---
+
+## Gereksinimler
+
+- `bash`, `git`
+- (isteğe bağlı) `notify-send` — masaüstü bildirimi  
+- (isteğe bağlı) `systemctl --user` — günlük kontrol timer’ı  
+- (isteğe bağlı) `rsync` — geri yüklemede tercih edilir  
+
+---
 
 ## Kurulum
 
 ```bash
-chmod +x iiup
-./iiup install-link      # ~/.local/bin/iiup
-./iiup enable-timer      # günde 1 kez otomatik check
+git clone https://github.com/H0dg4m/iiup.git ~/.local/share/iiup
+chmod +x ~/.local/share/iiup/iiup
+~/.local/share/iiup/iiup install-link
 ```
 
-Fish kullanıyorsan `~/.local/bin` PATH’te olmalı:
+`~/.local/bin` PATH’te olmalı:
 
-```fish
+```bash
+# fish
 fish_add_path ~/.local/bin
+
+# bash / zsh — ~/.bashrc veya ~/.zshrc
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Kullanım
+Ardından ilk kurulum:
+
+```bash
+iiup setup
+```
+
+Varsayılan bir dots reposu **yok**. Config tanımlı değilken TTY’de `iiup check` / `iiup update` da otomatik `setup`’a düşer.
+
+İsteğe bağlı günlük kontrol:
+
+```bash
+iiup enable-timer
+```
+
+---
+
+## `iiup setup` ne sorar?
+
+| Soru | Örnek / not |
+|---|---|
+| Git repo URL | `https://github.com/sen/dotfiles.git` veya `git@…` |
+| Branch / tag | `main`, `master`, veya sabit bir tag |
+| Kısa isim | Bildirimlerde görünür (örn. `my-dots`) |
+| Yerel clone yolu | Öneri: `~/.local/share/src/<repo-adı>` |
+| Şimdi klonlansın mı? | Evet dersen clone + kurulum komutu tahmini |
+| Pull sonrası komut | `./install.sh`, `./setup`, `stow -R …`, veya **boş** = sadece git |
+| Hyprland yedek yolları? | Varsayılan **hayır** — istersen eklenir |
+
+Kurulum komutu dots’unun kendi betiğidir; iiup ne çalıştıracağını bilmez — sen yazarsın.
+
+Dots değiştirmek için tekrar `iiup setup` yeterli.
+
+---
+
+## Tipik kullanım
+
+```bash
+iiup check          # yeni sürüm var mı?
+iiup update         # gerekirse yedek + pull + UPDATE_CMD
+# bir süre dene…
+iiup ok             # sorun yok → pending yedeği sil
+# veya
+iiup restore        # bozuldu → son yedeğe dön
+```
+
+Zorla yeniden kurulum (zaten güncelsen bile):
+
+```bash
+iiup update --force
+```
+
+---
+
+## Komutlar
 
 | Komut | Açıklama |
 |---|---|
-| `iiup check` | Şimdi kontrol et (güncellemez) |
-| `iiup watch` | Sessiz kontrol; sadece güncelleme varsa bildirim |
-| `iiup update` | Gerekirse yedek + güncelle |
-| `iiup update --force` | Güncel olsa bile `./setup` yenile |
-| `iiup ok` | Güncelleme sorunsuz → pending yedeği sil |
-| `iiup restore` | Son yedeği geri yükle |
-| `iiup status` | Clone yolu, sürüm, timer, yedekler |
-| `iiup enable-timer` | Günlük systemd timer aç |
-| `iiup disable-timer` | Timer’ı kapat |
+| `iiup setup` | Takip edilecek dots’u tanımla / değiştir |
+| `iiup check` | Upstream’te yeni sürüm var mı bak |
+| `iiup watch` | Sessiz kontrol (timer; sadece güncelleme varsa bildir) |
+| `iiup update` | Gerekirse yedek + pull + `UPDATE_CMD` |
+| `iiup update --force` | Güncel olsa bile `UPDATE_CMD` çalıştır |
+| `iiup ok` | Pending yedeği sil (onay) |
+| `iiup restore [id\|latest]` | Yedeği geri yükle |
+| `iiup backup` | Sadece yedek al |
+| `iiup status` | Durum, pending, timer |
+| `iiup list` | Yedek listesi |
+| `iiup health` | Yedek yollarının hâlâ durduğunu kontrol et |
+| `iiup enable-timer` | Günlük otomatik `watch` |
+| `iiup disable-timer` | Timer kapat |
+| `iiup install-link` | `~/.local/bin/iiup` symlink |
+| `iiup help` | Yardım |
 
-Tipik akış:
+---
 
-```bash
-iiup update          # veya bildirim gelince
-# Hyprland’i bir süre kullan
-iiup ok              # sorun yoksa
-# iiup restore       # sorun varsa
-```
+## Yedeklenecek dosyalar
 
-## Dosya konumları
-
-| Ne | Nerede |
-|---|---|
-| Bu proje (script) | `~/.local/share/iiup` |
-| Komut symlink | `~/.local/bin/iiup` → bu script |
-| Ayarlar | `~/.config/iiup/config` |
-| Ek yedek listesi | `~/.config/iiup/paths.list` |
-| Yedekler / log | `~/.local/state/iiup/` |
-| dots-hyprland clone | `~/clone/dots-hyprland` (config’den değişir) |
-| systemd timer | `~/.config/systemd/user/iiup-check.{timer,service}` |
-
-### Projeyi başka klasöre taşırsam?
-
-Taşıyabilirsin. Sonra **bir kez** yeniden bağla:
+Liste: `~/.config/iiup/paths.list` — satır başına bir yol. `#` yorum satırı. `~` ve `$HOME` kullanılabilir.
 
 ```bash
-/yeni/yol/iiup/iiup install-link
-/yeni/yol/iiup/iiup enable-timer
+# örnek
+$HOME/.config/hypr/custom
+$HOME/.config/kitty
+$HOME/.config/fish/config.fish
+$HOME/.config/waybar
 ```
 
-Aksi halde `~/.local/bin/iiup` ve timer eski yolu gösterir.  
-`~/.config/iiup` ve `~/.local/state/iiup` taşınmaz; onlar XDG altında kalır.
+Config içinde dizi olarak da eklenebilir:
 
-dots-hyprland clone’u (`~/clone/...`) ayrıdır; proje klasörünü taşımak clone’u etkilemez.
+```bash
+BACKUP_EXTRA=(
+  "$HOME/.config/nvim"
+  "$HOME/.local/share/fonts"
+)
+```
+
+Liste boşsa `update` yine çalışır; sadece yedek alınacak bir şey bulunamazsa uyarı verir.
+
+---
 
 ## Config
 
-`~/.config/iiup/config` örneği:
+Dosya: `~/.config/iiup/config` (`iiup setup` yazar; elle de düzenleyebilirsin).
 
 ```bash
-REPO_DIR="$HOME/clone/dots-hyprland"
-REPO_URL="https://github.com/end-4/dots-hyprland.git"
-REPO_BRANCH="main"              # veya sabit tag: 2026.05.11
-UPDATE_MODE="install"          # install | exp-update | exp-merge
-SETUP_ARGS="--force --skip-allgreeting -s"
-CHECK_ON_CALENDAR="daily"       # veya *-*-* 10:00:00
+DOTS_NAME="my-dots"
+REPO_URL="https://github.com/someone/dotfiles.git"
+REPO_DIR="$HOME/.local/share/src/dotfiles"
+REPO_BRANCH="main"
+
+# Pull sonrası (boş = sadece git pull)
+UPDATE_CMD="./install.sh"
+# UPDATE_CMD="stow -R -t $HOME ."
+# UPDATE_CMD="./setup install --force"
+
 NOTIFY=1
+KEEP_FAILED_BACKUPS=5
+CHECK_ON_CALENDAR="daily"   # veya: *-*-* 10:00:00
 ```
 
-`CHECK_ON_CALENDAR` değişince: `iiup enable-timer`
+### Farklı dots örnekleri
 
-## Yedeklenenler (varsayılan)
+**Sadece git** (kurulum betiği yok):
 
-- `~/.config/hypr/custom/` (keybind, script, vs.)
-- `hyprland.lua`, `monitors.lua` / `.conf`, workspaces
-- `~/.config/illogical-impulse/` (`config.json` dahil)
-- idle / lock conf ve ignore dosyaları
+```bash
+UPDATE_CMD=""
+```
 
-Ek yol için `~/.config/iiup/paths.list` veya config’de `BACKUP_EXTRA`.
+**GNU Stow:**
 
-## Gereksinimler
+```bash
+UPDATE_CMD="stow -R -t \"$HOME\" ."
+```
 
-- Arch / CachyOS (veya dots-hyprland’in desteklediği distro)
-- `git`, `systemctl --user`, `notify-send` (bildirim için)
-- Hyprland + illogical-impulse kurulumu
+**Kendi install script’in:**
+
+```bash
+UPDATE_CMD="bash ./install.sh"
+```
+
+**end-4 / illogical-impulse tarzı** (istersen; varsayılan değil):
+
+```bash
+UPDATE_CMD="./setup install --force --skip-allgreeting -s"
+```
+
+---
+
+## Dosya konumları (XDG)
+
+| Ne | Nerede |
+|---|---|
+| Uygulama | `~/.local/share/iiup/` |
+| Komut | `~/.local/bin/iiup` |
+| Ayarlar | `~/.config/iiup/config` |
+| Yedek listesi | `~/.config/iiup/paths.list` |
+| Yedekler / log | `~/.local/state/iiup/` |
+| Dots clone | `config` içindeki `REPO_DIR` |
+| systemd timer | `~/.config/systemd/user/iiup-check.*` |
+
+Projeyi taşıdıktan sonra:
+
+```bash
+iiup install-link
+iiup enable-timer   # timer kullanıyorsan
+```
+
+---
+
+## Notlar
+
+- iiup, dots’unun içeriğini “bilmez”; sadece git + senin verdiğin komutu çalıştırır.  
+- Güncelleme sonrası yedek **otomatik silinmez** — `iiup ok` ile onaylarsın.  
+- Repo kirliyse güncellemede stash alınır.  
+- Root ile çalıştırma.
 
 ## Lisans
 
-Kişisel / MIT — istediğin gibi kullan, fork’la, paylaş.
-# iiup
+MIT — kullan, fork’la, paylaş.
