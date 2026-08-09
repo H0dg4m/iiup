@@ -1,5 +1,6 @@
+# Paths to back up before update (one per line)
 # Güncellemeden önce yedeklenecek yollar (satır başına bir)
-# ~ veya $HOME kullanılabilir. Boş bırakılabilir.
+# ~ or $HOME allowed / kullanılabilir. Can be empty / boş bırakılabilir.
 
 # $HOME/.config/hypr/custom
 # $HOME/.config/kitty

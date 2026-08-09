@@ -1,12 +1,40 @@
 #!/usr/bin/env bash
-# iiup — git tabanlı dotfiles güvenli güncelleyici
-# Akış: setup → check → update → ok | restore
+# iiup — safe git-based dotfiles updater / güvenli dotfiles güncelleyici
+# Flow: setup → check → update → ok | restore
 set -euo pipefail
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "$SCRIPT_PATH")"
+
+# ─── Language (IIUP_LANG=en|tr, else LANG) ────────────────────────────────────
+detect_lang() {
+  local raw loc
+  raw="${IIUP_LANG:-}"
+  if [[ -n "$raw" ]]; then
+    case "${raw,,}" in
+      tr|tr_*|turkish|türkçe|turkce) IIUP_LANG=tr ;;
+      *) IIUP_LANG=en ;;
+    esac
+    return
+  fi
+  loc="${LC_ALL:-${LC_MESSAGES:-${LANG:-en_US}}}"
+  case "${loc,,}" in
+    tr|tr_*|*.tr) IIUP_LANG=tr ;;
+    *) IIUP_LANG=en ;;
+  esac
+}
+detect_lang
+
+# m "English" "Türkçe"
+m() {
+  if [[ "${IIUP_LANG}" == "tr" ]]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 # ─── Log ──────────────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -31,14 +59,13 @@ ask() {
     while true; do
       read -r -p "$__q: " __ans || true
       [[ -n "$__ans" ]] && break
-      warn "Bu alan zorunlu."
+      warn "$(m "This field is required." "Bu alan zorunlu.")"
     done
   fi
   printf -v "$__var" '%s' "$__ans"
 }
 
 confirm() {
-  # confirm "soru" [varsayılan Y|N]
   local q="$1" def="${2:-N}" ans
   if [[ "$def" =~ ^[yY]$ ]]; then
     read -r -p "$q [Y/n] " ans || true
@@ -49,7 +76,7 @@ confirm() {
   fi
 }
 
-# ─── XDG / config (varsayılan dots YOK) ───────────────────────────────────────
+# ─── XDG / config (no default dots repo) ──────────────────────────────────────
 : "${XDG_CONFIG_HOME:=$HOME/.config}"
 : "${XDG_STATE_HOME:=$HOME/.local/state}"
 : "${XDG_DATA_HOME:=$HOME/.local/share}"
@@ -66,7 +93,6 @@ REPO_DIR="${REPO_DIR:-}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 DOTS_NAME="${DOTS_NAME:-}"
 UPDATE_CMD="${UPDATE_CMD:-}"
-# Eski config uyumu
 UPDATE_MODE="${UPDATE_MODE:-}"
 SETUP_ARGS="${SETUP_ARGS:-}"
 
@@ -77,8 +103,8 @@ ASSUME_YES="${ASSUME_YES:-0}"
 CHECK_ON_CALENDAR="${CHECK_ON_CALENDAR:-daily}"
 UNIT_NAME="iiup-check"
 
-# ─── Yardımcılar ──────────────────────────────────────────────────────────────
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "'$1' bulunamadı."; }
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "$(m "'$1' not found." "'$1' bulunamadı.")"; }
 
 notify() {
   [[ "$NOTIFY" == "1" ]] || return 0
@@ -103,6 +129,8 @@ load_config() {
     # shellcheck disable=SC1090
     source "$IIUP_CONFIG"
   fi
+  # Re-apply language if config sets IIUP_LANG
+  detect_lang
   if [[ -z "${UPDATE_CMD:-}" && -n "${UPDATE_MODE:-}" ]]; then
     UPDATE_CMD="./setup ${UPDATE_MODE}${SETUP_ARGS:+ $SETUP_ARGS}"
   fi
@@ -121,15 +149,15 @@ require_configured() {
   if is_configured; then
     return 0
   fi
-  err "Henüz dots tanımlı değil."
+  err "$(m "No dots repo configured yet." "Henüz dots tanımlı değil.")"
   if [[ -t 0 && -t 1 ]]; then
-    info "İlk kurulum başlıyor…"
+    info "$(m "Starting first-time setup…" "İlk kurulum başlıyor…")"
     cmd_setup
     load_config
-    is_configured || die "Kurulum tamamlanmadı."
+    is_configured || die "$(m "Setup was not completed." "Kurulum tamamlanmadı.")"
     return 0
   fi
-  printf "Çalıştır: ${C_GRN}iiup setup${C_RST}\n" >&2
+  printf "%s ${C_GRN}iiup setup${C_RST}\n" "$(m "Run:" "Çalıştır:")" >&2
   exit 2
 }
 
@@ -165,36 +193,38 @@ expand_path() {
 write_config_file() {
   ensure_dirs
   cat >"$IIUP_CONFIG" <<EOF
-# iiup — iiup setup ile oluşturuldu ($(date -Iseconds))
+# iiup config — created by iiup setup ($(date -Iseconds))
+# Language: IIUP_LANG=en|tr  (optional)
 
 DOTS_NAME="$DOTS_NAME"
 REPO_URL="$REPO_URL"
 REPO_DIR="$REPO_DIR"
 REPO_BRANCH="$REPO_BRANCH"
 
-# Pull sonrası komut (boş = sadece git)
-# Örnek: "./install.sh"  |  "./setup"  |  "stow -R -t \$HOME ."
+# Command after git pull (empty = git only)
+# Examples: "./install.sh"  |  "./setup"  |  "stow -R -t \$HOME ."
 UPDATE_CMD="$UPDATE_CMD"
 
 NOTIFY=$NOTIFY
 KEEP_BACKUPS=$KEEP_BACKUPS
 CHECK_ON_CALENDAR="$CHECK_ON_CALENDAR"
 EOF
-  ok "Config: $IIUP_CONFIG"
+  ok "$(m "Config:" "Config:") $IIUP_CONFIG"
 }
 
 write_paths_template() {
   local path="$IIUP_CONFIG_DIR/paths.list"
   [[ -f "$path" ]] && return 0
   cat >"$path" <<'PL'
-# Güncellemeden önce yedeklenecek yollar (satır başına bir tane)
-# ~ veya $HOME kullanılabilir. Boş bırakılabilir.
+# Paths to back up before update (one per line)
+# Güncellemeden önce yedeklenecek yollar (satır başına bir)
+# ~ or $HOME allowed. Can be left empty.
 #
 # $HOME/.config/hypr/custom
 # $HOME/.config/kitty
 # $HOME/.config/fish
 PL
-  ok "Yedek listesi: $path"
+  ok "$(m "Backup list:" "Yedek listesi:") $path"
 }
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
@@ -203,27 +233,27 @@ cmd_setup() {
   need_cmd git
 
   if [[ ! -t 0 ]]; then
-    die "setup TTY ister. Elle yaz: $IIUP_CONFIG"
+    die "$(m "setup needs a TTY. Edit manually: $IIUP_CONFIG" "setup TTY ister. Elle yaz: $IIUP_CONFIG")"
   fi
 
   echo
-  echo "${C_BOLD}iiup setup${C_RST} — takip edilecek dots’u seç"
+  echo "${C_BOLD}iiup setup${C_RST} — $(m "choose the dots repo to track" "takip edilecek dots’u seç")"
   echo
 
   if [[ -f "$IIUP_CONFIG" ]]; then
     load_config
     if is_configured; then
-      warn "Mevcut: ${DOTS_NAME:-?} → $REPO_URL"
-      confirm "Üzerine yazılsın mı?" N || die "İptal."
+      warn "$(m "Current:" "Mevcut:") ${DOTS_NAME:-?} → $REPO_URL"
+      confirm "$(m "Overwrite?" "Üzerine yazılsın mı?")" N || die "$(m "Cancelled." "İptal.")"
     fi
   fi
 
   local url branch dir name ucmd
-  ask url "Git repo URL"
-  ask branch "Branch / tag" "main"
+  ask url "$(m "Git repo URL" "Git repo URL")"
+  ask branch "$(m "Branch / tag" "Branch / tag")" "main"
   name="$(repo_basename_from_url "$url")"
   dir="$XDG_DATA_HOME/src/$name"
-  ask dir "Yerel klasör" "$dir"
+  ask dir "$(m "Local folder" "Yerel klasör")" "$dir"
   dir="$(expand_path "$dir")"
 
   echo
@@ -231,7 +261,7 @@ cmd_setup() {
   echo "  $url  ($branch)"
   echo "  → $dir"
   echo
-  confirm "Kaydet ve klonla?" Y || die "İptal."
+  confirm "$(m "Save and clone?" "Kaydet ve klonla?")" Y || die "$(m "Cancelled." "İptal.")"
 
   DOTS_NAME="$name"
   REPO_URL="$url"
@@ -242,10 +272,10 @@ cmd_setup() {
   CHECK_ON_CALENDAR="daily"
 
   if [[ -d "$REPO_DIR/.git" ]]; then
-    ok "Clone zaten var"
+    ok "$(m "Clone already exists" "Clone zaten var")"
   else
     mkdir -p "$(dirname "$REPO_DIR")"
-    info "Klonlanıyor…"
+    info "$(m "Cloning…" "Klonlanıyor…")"
     git clone --recursive "$REPO_URL" "$REPO_DIR"
     (
       cd "$REPO_DIR"
@@ -255,17 +285,17 @@ cmd_setup() {
         git checkout --detach "$REPO_BRANCH"
       fi
     )
-    ok "Klonlandı"
+    ok "$(m "Cloned" "Klonlandı")"
   fi
 
   ucmd="$(suggest_update_cmd "$REPO_DIR")"
   echo
   if [[ -n "$ucmd" ]]; then
-    info "Kurulum betiği bulundu."
+    info "$(m "Install script found." "Kurulum betiği bulundu.")"
   else
-    warn "Kurulum betiği yok — sadece git pull yapılabilir."
+    warn "$(m "No install script — git pull only." "Kurulum betiği yok — sadece git pull.")"
   fi
-  ask ucmd "Pull sonrası komut (boş = sadece git)" "$ucmd"
+  ask ucmd "$(m "Post-pull command (empty = git only)" "Pull sonrası komut (boş = sadece git)")" "$ucmd"
   UPDATE_CMD="$ucmd"
 
   write_paths_template
@@ -273,14 +303,14 @@ cmd_setup() {
   cmd_install_link
 
   echo
-  ok "Hazır."
-  printf "\n  ${C_DIM}Yedeklemek istediğin dosyaları ekle:${C_RST}\n"
+  ok "$(m "Ready." "Hazır.")"
+  printf "\n  ${C_DIM}%s${C_RST}\n" "$(m "Add paths to back up:" "Yedeklemek istediğin dosyaları ekle:")"
   printf "  ${C_DIM}%s/paths.list${C_RST}\n\n" "$IIUP_CONFIG_DIR"
-  printf "  ${C_GRN}iiup check${C_RST}    güncelleme var mı?\n"
-  printf "  ${C_GRN}iiup update${C_RST}   güvenli güncelle\n"
-  printf "  ${C_GRN}iiup doctor${C_RST}   sistem kontrolü\n"
+  printf "  ${C_GRN}iiup check${C_RST}    %s\n" "$(m "any updates?" "güncelleme var mı?")"
+  printf "  ${C_GRN}iiup update${C_RST}   %s\n" "$(m "safe update" "güvenli güncelle")"
+  printf "  ${C_GRN}iiup doctor${C_RST}   %s\n" "$(m "health check" "sistem kontrolü")"
   if command -v systemctl >/dev/null 2>&1; then
-    printf "  ${C_GRN}iiup timer on${C_RST}  günlük bildirim\n"
+    printf "  ${C_GRN}iiup timer on${C_RST}  %s\n" "$(m "daily notify" "günlük bildirim")"
   fi
   echo
 }
@@ -290,7 +320,7 @@ ensure_repo() {
   require_configured
   need_cmd git
   if [[ ! -d "$REPO_DIR/.git" ]]; then
-    info "Klonlanıyor: $REPO_URL → $REPO_DIR"
+    info "$(m "Cloning:" "Klonlanıyor:") $REPO_URL → $REPO_DIR"
     mkdir -p "$(dirname "$REPO_DIR")"
     git clone --recursive "$REPO_URL" "$REPO_DIR"
   fi
@@ -305,7 +335,7 @@ pretty_rev() {
 
 fetch_and_compare() {
   ensure_repo
-  info "Upstream kontrol… ($REPO_BRANCH)"
+  info "$(m "Checking upstream…" "Upstream kontrol…") ($REPO_BRANCH)"
   (
     cd "$REPO_DIR"
     git remote set-url origin "$REPO_URL" 2>/dev/null || true
@@ -323,7 +353,7 @@ fetch_and_compare() {
     remote_sha="$(git -C "$REPO_DIR" rev-parse "$REPO_BRANCH^{commit}")"
     remote_pretty="$(git -C "$REPO_DIR" describe --tags --always "$REPO_BRANCH" 2>/dev/null || echo "${remote_sha:0:7}")"
   else
-    warn "Branch/tag çözülemedi: $REPO_BRANCH"
+    warn "$(m "Could not resolve branch/tag:" "Branch/tag çözülemedi:") $REPO_BRANCH"
     printf '%s %s %s %s\n' "$local_sha" "unknown" "$local_pretty" "?"
     return 2
   fi
@@ -343,7 +373,7 @@ commit_distance() {
 show_incoming() {
   local local_sha="$1" remote_sha="$2" behind
   behind="$(git -C "$REPO_DIR" rev-list --count "${local_sha}..${remote_sha}" 2>/dev/null || echo "?")"
-  info "Gelen commitler ($behind):"
+  info "$(m "Incoming commits ($behind):" "Gelen commitler ($behind):")"
   git -C "$REPO_DIR" log --oneline -8 "${local_sha}..${remote_sha}" >&2 || true
 }
 
@@ -360,25 +390,25 @@ cmd_check() {
   set -- $cmp_out
   local local_sha="$1" remote_sha="$2" local_pretty="$3" remote_pretty="$4"
 
-  echo
-  echo "${C_BOLD}$(dots_label)${C_RST}"
-  echo "  lokal:  $local_pretty"
-  echo "  uzak:   $remote_pretty  ($REPO_BRANCH)"
+  echo >&2
+  echo "${C_BOLD}$(dots_label)${C_RST}" >&2
+  echo "  $(m "local:" "lokal:")  $local_pretty" >&2
+  echo "  $(m "remote:" "uzak:")  $remote_pretty  ($REPO_BRANCH)" >&2
 
   if (( rc == 0 )); then
-    ok "Güncelsin."
+    ok "$(m "You're up to date." "Güncelsin.")"
     return 0
   elif (( rc == 2 )); then
-    warn "Karşılaştırılamadı."
+    warn "$(m "Could not compare." "Karşılaştırılamadı.")"
     return 2
   fi
 
   show_incoming "$local_sha" "$remote_sha"
-  printf "Güncelle: ${C_GRN}iiup update${C_RST}\n" >&2
+  printf "%s ${C_GRN}iiup update${C_RST}\n" "$(m "Update with:" "Güncelle:")" >&2
   local behind
   behind="$(commit_distance "$local_sha" "$remote_sha")"
   behind="${behind%% *}"
-  notify critical "$(dots_label) güncellemesi var" \
+  notify critical "$(m "$(dots_label) update available" "$(dots_label) güncellemesi var")" \
     "$local_pretty → $remote_pretty ($behind). iiup update"
   return 1
 }
@@ -390,11 +420,11 @@ cmd_watch() {
   {
     echo "---- $(date -Iseconds) ----"
     if ! is_configured; then
-      echo "yapılandırılmamış"
+      echo "not configured"
       return 0
     fi
     if [[ ! -d "$REPO_DIR/.git" ]]; then
-      echo "klon yok"
+      echo "no clone"
       return 0
     fi
   } >>"$logfile"
@@ -410,7 +440,7 @@ cmd_watch() {
     local behind
     behind="$(commit_distance "$local_sha" "$remote_sha")"
     behind="${behind%% *}"
-    notify critical "$(dots_label) güncellemesi var" \
+    notify critical "$(m "$(dots_label) update available" "$(dots_label) güncellemesi var")" \
       "$local_pretty → $remote_pretty ($behind). iiup update"
     echo "notify" >>"$logfile"
   fi
@@ -424,7 +454,7 @@ write_systemd_units() {
   local dir bin cal
   dir="$(systemd_dir)"
   bin="$SCRIPT_PATH"
-  [[ -x "$bin" ]] || die "iiup yok: $bin"
+  [[ -x "$bin" ]] || die "$(m "iiup not found: $bin" "iiup yok: $bin")"
   cal="${CHECK_ON_CALENDAR:-daily}"
   mkdir -p "$dir"
   cat >"$dir/${UNIT_NAME}.service" <<EOF
@@ -463,13 +493,13 @@ cmd_timer() {
       write_systemd_units
       systemctl --user daemon-reload
       systemctl --user enable --now "${UNIT_NAME}.timer"
-      ok "Günlük kontrol açık ($CHECK_ON_CALENDAR)"
+      ok "$(m "Daily check enabled ($CHECK_ON_CALENDAR)" "Günlük kontrol açık ($CHECK_ON_CALENDAR)")"
       systemctl --user list-timers "${UNIT_NAME}.timer" --no-pager || true
       ;;
     off|disable)
       need_cmd systemctl
       systemctl --user disable --now "${UNIT_NAME}.timer" 2>/dev/null || true
-      ok "Günlük kontrol kapalı"
+      ok "$(m "Daily check disabled" "Günlük kontrol kapalı")"
       ;;
     status|*)
       timer_status_line
@@ -479,27 +509,27 @@ cmd_timer() {
 
 timer_status_line() {
   if ! command -v systemctl >/dev/null 2>&1; then
-    echo "timer:  (systemctl yok)"
+    echo "timer:  ($(m "no systemctl" "systemctl yok"))" >&2
     return
   fi
   if systemctl --user is-enabled "${UNIT_NAME}.timer" >/dev/null 2>&1; then
     local next
     next="$(systemctl --user show "${UNIT_NAME}.timer" -p NextElapseUSecRealtime --value 2>/dev/null || echo "?")"
-    echo "timer:  ${C_GRN}açık${C_RST}  sonraki: $next"
+    echo "timer:  ${C_GRN}$(m "on" "açık")${C_RST}  $(m "next:" "sonraki:") $next" >&2
   else
-    echo "timer:  kapalı  →  iiup timer on"
+    echo "timer:  $(m "off" "kapalı")  →  iiup timer on" >&2
   fi
 }
 
 repo_update() {
   ensure_repo
-  info "Repo güncelleniyor…"
+  info "$(m "Updating repo…" "Repo güncelleniyor…")"
   (
     cd "$REPO_DIR"
     if [[ -n "$(git status --porcelain)" ]]; then
-      warn "Repo kirli (yerel değişiklik var)."
+      warn "$(m "Repo is dirty (local changes)." "Repo kirli (yerel değişiklik var).")"
       if [[ -t 0 ]] && [[ "$ASSUME_YES" != "1" ]]; then
-        confirm "Stash alıp devam edilsin mi?" Y || die "İptal."
+        confirm "$(m "Stash and continue?" "Stash alıp devam edilsin mi?")" Y || die "$(m "Cancelled." "İptal.")"
       fi
       git stash push -u -m "iiup-auto-$(date +%Y%m%d-%H%M%S)" || true
     fi
@@ -509,14 +539,14 @@ repo_update() {
     elif git rev-parse --verify "$REPO_BRANCH^{commit}" >/dev/null 2>&1; then
       git checkout --detach "$REPO_BRANCH"
     else
-      die "Branch/tag yok: $REPO_BRANCH"
+      die "$(m "Branch/tag not found:" "Branch/tag yok:") $REPO_BRANCH"
     fi
     [[ -f .gitmodules ]] && git submodule update --init --recursive
   )
   ok "Repo: $(pretty_rev)"
 }
 
-# ─── Yedek ────────────────────────────────────────────────────────────────────
+# ─── Backup ───────────────────────────────────────────────────────────────────
 backup_path_list() {
   local p
   if declare -p BACKUP_EXTRA >/dev/null 2>&1; then
@@ -545,7 +575,7 @@ do_backup() {
 
   ensure_dirs
   mkdir -p "$dest/files"
-  info "Yedek → $dest"
+  info "$(m "Backup →" "Yedek →") $dest"
   {
     echo "stamp=$stamp"
     echo "date=$(date -Iseconds)"
@@ -568,10 +598,10 @@ do_backup() {
   done < <(backup_path_list | awk 'NF && !seen[$0]++')
 
   if (( count == 0 )); then
-    warn "Yedeklenecek dosya yok (paths.list boş olabilir)."
+    warn "$(m "Nothing to back up (paths.list may be empty)." "Yedeklenecek dosya yok (paths.list boş olabilir).")"
   fi
   printf 'file_count=%s\n' "$count" >>"$manifest"
-  ok "Yedek ($count öğe)"
+  ok "$(m "Backup ($count items)" "Yedek ($count öğe)")"
   printf '%s\n' "$stamp"
 }
 
@@ -580,16 +610,16 @@ do_restore() {
   if [[ -z "$stamp" ]]; then
     stamp="$(latest_pending 2>/dev/null || true)"
   fi
-  [[ -n "$stamp" ]] || die "Kullanım: iiup restore [id|latest]"
+  [[ -n "$stamp" ]] || die "$(m "Usage: iiup restore [id|latest]" "Kullanım: iiup restore [id|latest]")"
   if [[ "$stamp" == "latest" ]]; then
     stamp="$(ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{8}-' | sort | tail -1 || true)"
   fi
   local src_dir="$BACKUP_ROOT/$stamp/files"
-  [[ -d "$src_dir" ]] || die "Yedek yok: $stamp"
+  [[ -d "$src_dir" ]] || die "$(m "Backup not found:" "Yedek yok:") $stamp"
 
-  warn "Geri yükleme: $stamp → \$HOME"
+  warn "$(m "Restore:" "Geri yükleme:") $stamp → \$HOME"
   if [[ -t 0 ]] && [[ "$ASSUME_YES" != "1" ]]; then
-    confirm "Devam?" N || die "İptal."
+    confirm "$(m "Continue?" "Devam?")" N || die "$(m "Cancelled." "İptal.")"
   fi
 
   if command -v rsync >/dev/null 2>&1; then
@@ -597,14 +627,14 @@ do_restore() {
   else
     cp -a "$src_dir"/. "$HOME"/
   fi
-  ok "Geri yüklendi: $stamp"
-  notify "iiup" "Yedek geri yüklendi: $stamp"
+  ok "$(m "Restored:" "Geri yüklendi:") $stamp"
+  notify "iiup" "$(m "Backup restored: $stamp" "Yedek geri yüklendi: $stamp")"
 }
 
 delete_backup() {
   local stamp="$1"
   rm -rf "$BACKUP_ROOT/$stamp" "$BACKUP_ROOT/$stamp.tar.gz"
-  ok "Yedek silindi: $stamp"
+  ok "$(m "Backup deleted:" "Yedek silindi:") $stamp"
 }
 
 prune_old_backups() {
@@ -618,19 +648,19 @@ prune_old_backups() {
   done
 }
 
-# ─── Güncelleme ───────────────────────────────────────────────────────────────
+# ─── Update ───────────────────────────────────────────────────────────────────
 run_update_cmd() {
   ensure_repo
   local logfile="$LOG_DIR/update-$(stamp_now).log" rc=0
 
   if [[ -z "${UPDATE_CMD:-}" ]]; then
-    ok "Sadece git güncellendi (UPDATE_CMD boş)."
+    ok "$(m "Git only (UPDATE_CMD empty)." "Sadece git güncellendi (UPDATE_CMD boş).")"
     return 0
   fi
 
-  [[ "$(id -u)" -eq 0 ]] && die "Root ile çalıştırma."
+  [[ "$(id -u)" -eq 0 ]] && die "$(m "Do not run as root." "Root ile çalıştırma.")"
 
-  info "Çalışıyor: $UPDATE_CMD"
+  info "$(m "Running:" "Çalışıyor:") $UPDATE_CMD"
   info "Log: $logfile"
   set +e
   set -o pipefail
@@ -643,7 +673,7 @@ run_update_cmd() {
   set +o pipefail
   set -e
   (( rc == 0 )) || return "$rc"
-  ok "Komut bitti"
+  ok "$(m "Command finished" "Komut bitti")"
 }
 
 cmd_update() {
@@ -658,13 +688,13 @@ cmd_update() {
   done
 
   if [[ -f "$PENDING_FILE" ]]; then
-    warn "Önceki güncelleme onay bekliyor: $(cat "$PENDING_FILE")"
-    warn "  iiup ok      sorun yok"
-    warn "  iiup restore geri al"
+    warn "$(m "Previous update still pending:" "Önceki güncelleme onay bekliyor:") $(cat "$PENDING_FILE")"
+    warn "  iiup ok      $(m "all good" "sorun yok")"
+    warn "  iiup restore $(m "roll back" "geri al")"
     if [[ -t 0 ]] && [[ "$ASSUME_YES" != "1" ]]; then
-      confirm "Yine de yeni güncelleme?" N || die "İptal."
+      confirm "$(m "Update again anyway?" "Yine de yeni güncelleme?")" N || die "$(m "Cancelled." "İptal.")"
     else
-      [[ "$ASSUME_YES" == "1" ]] || die "Pending yedek var."
+      [[ "$ASSUME_YES" == "1" ]] || die "$(m "Pending backup exists." "Pending yedek var.")"
     fi
   fi
 
@@ -675,26 +705,26 @@ cmd_update() {
   local local_sha="$1" remote_sha="$2" local_pretty="$3" remote_pretty="$4"
 
   if (( rc == 0 )) && [[ "$FORCE_UPDATE" != "1" ]]; then
-    ok "Zaten güncelsin."
-    printf "Zorla: ${C_DIM}iiup update --force${C_RST}\n" >&2
+    ok "$(m "Already up to date." "Zaten güncelsin.")"
+    printf "%s ${C_DIM}iiup update --force${C_RST}\n" "$(m "Force:" "Zorla:")" >&2
     return 0
   fi
 
   if (( rc == 0 )) && [[ "$FORCE_UPDATE" == "1" ]]; then
-    warn "--force: kurulum yeniden çalışacak."
+    warn "$(m "--force: will re-run install command." "--force: kurulum yeniden çalışacak.")"
   elif (( rc == 1 )); then
     show_incoming "$local_sha" "$remote_sha"
     echo
     echo "  $local_pretty  →  $remote_pretty"
     if [[ -n "${UPDATE_CMD:-}" ]]; then
-      echo "  sonra: $UPDATE_CMD"
+      echo "  $(m "then:" "sonra:") $UPDATE_CMD"
     fi
     echo
     if [[ -t 0 ]] && [[ "$ASSUME_YES" != "1" ]]; then
-      confirm "Yedek alıp güncelle?" Y || die "İptal."
+      confirm "$(m "Back up and update?" "Yedek alıp güncelle?")" Y || die "$(m "Cancelled." "İptal.")"
     fi
   elif (( rc == 2 )); then
-    die "Upstream çözülemedi."
+    die "$(m "Could not resolve upstream." "Upstream çözülemedi.")"
   fi
 
   local stamp
@@ -707,17 +737,17 @@ cmd_update() {
   run_update_cmd || setup_rc=$?
 
   if (( setup_rc != 0 )); then
-    err "Komut başarısız (exit $setup_rc)."
-    err "Geri al: iiup restore"
-    notify critical "iiup" "Güncelleme başarısız — iiup restore"
+    err "$(m "Command failed (exit $setup_rc)." "Komut başarısız (exit $setup_rc).")"
+    err "$(m "Roll back: iiup restore" "Geri al: iiup restore")"
+    notify critical "iiup" "$(m "Update failed — iiup restore" "Güncelleme başarısız — iiup restore")"
     exit "$setup_rc"
   fi
 
   echo
-  ok "Güncelleme tamam. Yedek duruyor: $stamp"
-  printf "  Sorun yoksa:  ${C_GRN}iiup ok${C_RST}\n"
-  printf "  Bozulduysa:   ${C_YLW}iiup restore${C_RST}\n"
-  notify "iiup" "$(dots_label) güncellendi → iiup ok | iiup restore"
+  ok "$(m "Update done. Backup kept:" "Güncelleme tamam. Yedek duruyor:") $stamp"
+  printf "  %s  ${C_GRN}iiup ok${C_RST}\n" "$(m "All good:" "Sorun yoksa:")"
+  printf "  %s   ${C_YLW}iiup restore${C_RST}\n" "$(m "Broken:" "Bozulduysa:")"
+  notify "iiup" "$(m "$(dots_label) updated → iiup ok | iiup restore" "$(dots_label) güncellendi → iiup ok | iiup restore")"
 }
 
 cmd_ok() {
@@ -725,74 +755,76 @@ cmd_ok() {
   ensure_dirs
   local stamp
   stamp="$(latest_pending 2>/dev/null || true)"
-  [[ -n "$stamp" ]] || die "Onay bekleyen yedek yok."
+  [[ -n "$stamp" ]] || die "$(m "No pending backup to confirm." "Onay bekleyen yedek yok.")"
 
   if [[ -t 0 ]] && [[ "$ASSUME_YES" != "1" ]]; then
-    confirm "Yedek silinsin mi? ($stamp)" Y || die "İptal — yedek duruyor."
+    confirm "$(m "Delete backup? ($stamp)" "Yedek silinsin mi? ($stamp)")" Y || die "$(m "Cancelled — backup kept." "İptal — yedek duruyor.")"
   fi
   delete_backup "$stamp"
   clear_pending
   prune_old_backups
-  ok "Onaylandı."
-  notify "iiup" "Yedek temizlendi"
+  ok "$(m "Confirmed." "Onaylandı.")"
+  notify "iiup" "$(m "Backup cleaned up" "Yedek temizlendi")"
 }
 
 cmd_status() {
   load_config
   ensure_dirs
-  echo "${C_BOLD}iiup${C_RST} v$VERSION"
-  if is_configured; then
-    echo "dots:    $(dots_label)"
-    echo "url:     $REPO_URL"
-    echo "clone:   $REPO_DIR"
-    echo "branch:  $REPO_BRANCH"
-    echo "update:  ${UPDATE_CMD:-"(sadece git)"}"
-    if [[ -d "$REPO_DIR/.git" ]]; then
-      echo "rev:     $(pretty_rev)"
+  {
+    echo "${C_BOLD}iiup${C_RST} v$VERSION  [$IIUP_LANG]"
+    if is_configured; then
+      echo "dots:    $(dots_label)"
+      echo "url:     $REPO_URL"
+      echo "clone:   $REPO_DIR"
+      echo "branch:  $REPO_BRANCH"
+      echo "update:  ${UPDATE_CMD:-$(m "(git only)" "(sadece git)")}"
+      if [[ -d "$REPO_DIR/.git" ]]; then
+        echo "rev:     $(pretty_rev)"
+      else
+        echo "rev:     ($(m "no clone" "klon yok"))"
+      fi
     else
-      echo "rev:     (klon yok)"
+      echo "dots:    ${C_YLW}$(m "unset" "tanımsız")${C_RST}  →  iiup setup"
     fi
-  else
-    echo "dots:    ${C_YLW}tanımsız${C_RST}  →  iiup setup"
-  fi
-  timer_status_line
-  if [[ -f "$PENDING_FILE" ]]; then
-    echo "pending: ${C_YLW}$(cat "$PENDING_FILE")${C_RST}  →  ok | restore"
-  else
-    echo "pending: yok"
-  fi
-  echo "yedek:   $BACKUP_ROOT"
-  local n=0
-  while IFS= read -r s; do
-    n=1
-    local mark=""
-    [[ -f "$PENDING_FILE" && "$(cat "$PENDING_FILE")" == "$s" ]] && mark=" ${C_YLW}[pending]${C_RST}"
-    printf '  - %s%s\n' "$s" "$mark"
-  done < <(ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{8}-' | grep -v '\.tar\.gz$' | sort -r | head -10)
-  (( n )) || echo "  (boş)"
+    timer_status_line
+    if [[ -f "$PENDING_FILE" ]]; then
+      echo "pending: ${C_YLW}$(cat "$PENDING_FILE")${C_RST}  →  ok | restore"
+    else
+      echo "pending: $(m "none" "yok")"
+    fi
+    echo "$(m "backups:" "yedek:")  $BACKUP_ROOT"
+    local n=0
+    while IFS= read -r s; do
+      n=1
+      local mark=""
+      [[ -f "$PENDING_FILE" && "$(cat "$PENDING_FILE")" == "$s" ]] && mark=" ${C_YLW}[pending]${C_RST}"
+      printf '  - %s%s\n' "$s" "$mark"
+    done < <(ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{8}-' | grep -v '\.tar\.gz$' | sort -r | head -10)
+    (( n )) || echo "  ($(m "empty" "boş"))"
+  } >&2
 }
 
 cmd_doctor() {
   load_config
   ensure_dirs
   local issues=0
-  echo "${C_BOLD}iiup doctor${C_RST}"
+  echo "${C_BOLD}iiup doctor${C_RST}  [$IIUP_LANG]" >&2
 
   if command -v git >/dev/null 2>&1; then
     ok "git"
   else
-    err "git yok"; issues=$((issues + 1))
+    err "$(m "git missing" "git yok")"; issues=$((issues + 1))
   fi
 
   if [[ -L "$HOME/.local/bin/iiup" || -x "$HOME/.local/bin/iiup" ]]; then
-    ok "komut: ~/.local/bin/iiup"
+    ok "$(m "command:" "komut:") ~/.local/bin/iiup"
   else
-    warn "symlink yok → iiup install-link"; issues=$((issues + 1))
+    warn "$(m "no symlink → iiup install-link" "symlink yok → iiup install-link")"; issues=$((issues + 1))
   fi
 
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ok "PATH: ~/.local/bin" ;;
-    *) warn "~/.local/bin PATH'te değil"; issues=$((issues + 1)) ;;
+    *) warn "$(m "~/.local/bin not in PATH" "~/.local/bin PATH'te değil")"; issues=$((issues + 1)) ;;
   esac
 
   if is_configured; then
@@ -800,11 +832,15 @@ cmd_doctor() {
     if [[ -d "$REPO_DIR/.git" ]]; then
       ok "clone: $REPO_DIR ($(pretty_rev))"
     else
-      warn "clone yok: $REPO_DIR"
+      warn "$(m "no clone:" "clone yok:") $REPO_DIR"
     fi
-    [[ -n "${UPDATE_CMD:-}" ]] && ok "UPDATE_CMD: $UPDATE_CMD" || warn "UPDATE_CMD boş (sadece git)"
+    if [[ -n "${UPDATE_CMD:-}" ]]; then
+      ok "UPDATE_CMD: $UPDATE_CMD"
+    else
+      warn "$(m "UPDATE_CMD empty (git only)" "UPDATE_CMD boş (sadece git)")"
+    fi
   else
-    warn "dots tanımlı değil → iiup setup"; issues=$((issues + 1))
+    warn "$(m "dots not set → iiup setup" "dots tanımlı değil → iiup setup")"; issues=$((issues + 1))
   fi
 
   if [[ -f "$IIUP_CONFIG_DIR/paths.list" ]]; then
@@ -814,24 +850,24 @@ cmd_doctor() {
       pc=$((pc + 1))
     done <"$IIUP_CONFIG_DIR/paths.list"
     if (( pc > 0 )); then
-      ok "paths.list: $pc yol"
+      ok "paths.list: $pc $(m "paths" "yol")"
     else
-      warn "paths.list boş — güncellemede özel dosya yedeklenmez"
+      warn "$(m "paths.list empty — no custom file backup" "paths.list boş — özel dosya yedeklenmez")"
     fi
   else
-    warn "paths.list yok"
+    warn "$(m "paths.list missing" "paths.list yok")"
   fi
 
-  command -v notify-send >/dev/null 2>&1 && ok "notify-send" || warn "notify-send yok (bildirim kapalı)"
-  command -v systemctl >/dev/null 2>&1 && timer_status_line || warn "systemctl yok (timer yok)"
+  command -v notify-send >/dev/null 2>&1 && ok "notify-send" || warn "$(m "notify-send missing (no desktop notify)" "notify-send yok (bildirim kapalı)")"
+  command -v systemctl >/dev/null 2>&1 && timer_status_line || warn "$(m "systemctl missing (no timer)" "systemctl yok (timer yok)")"
 
-  [[ -f "$PENDING_FILE" ]] && warn "pending yedek: $(cat "$PENDING_FILE")"
+  [[ -f "$PENDING_FILE" ]] && warn "$(m "pending backup:" "pending yedek:") $(cat "$PENDING_FILE")"
 
   echo
   if (( issues == 0 )); then
-    ok "Sorun görünmüyor."
+    ok "$(m "Looks good." "Sorun görünmüyor.")"
   else
-    warn "$issues uyarı — yukarıya bak."
+    warn "$(m "$issues warning(s) — see above." "$issues uyarı — yukarıya bak.")"
   fi
   return 0
 }
@@ -843,12 +879,13 @@ cmd_install_link() {
   ok "Symlink: $target"
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
-    *) warn "~/.local/bin PATH'te değil" ;;
+    *) warn "$(m "~/.local/bin not in PATH" "~/.local/bin PATH'te değil")" ;;
   esac
 }
 
 usage() {
-  cat <<EOF
+  if [[ "$IIUP_LANG" == "tr" ]]; then
+    cat <<EOF
 ${C_BOLD}iiup${C_RST} v$VERSION — dotfiles güvenli güncelleyici
 
   iiup setup              Dots reposunu seç (ilk adım)
@@ -864,9 +901,32 @@ ${C_BOLD}iiup${C_RST} v$VERSION — dotfiles güvenli güncelleyici
   iiup update -y          Onay sorma
   iiup backup             Sadece yedek al
 
+Dil: LANG / IIUP_LANG=en|tr  (şimdi: $IIUP_LANG)
 Config: $IIUP_CONFIG
 Yedek listesi: $IIUP_CONFIG_DIR/paths.list
 EOF
+  else
+    cat <<EOF
+${C_BOLD}iiup${C_RST} v$VERSION — safe git-based dotfiles updater
+
+  iiup setup              Choose dots repo to track (first step)
+  iiup check              Any upstream updates?
+  iiup update             Backup + pull + install
+  iiup ok                 All good — delete pending backup
+  iiup restore            Roll back to backup
+  iiup status             Status
+  iiup doctor             Health check
+  iiup timer on|off       Daily notify
+
+  iiup update --force     Re-run install even if up to date
+  iiup update -y          Skip confirmations
+  iiup backup             Backup only
+
+Language: LANG / IIUP_LANG=en|tr  (now: $IIUP_LANG)
+Config: $IIUP_CONFIG
+Backup list: $IIUP_CONFIG_DIR/paths.list
+EOF
+  fi
 }
 
 main() {
@@ -888,9 +948,9 @@ main() {
     install-link)        cmd_install_link ;;
     help|-h|--help)      usage ;;
     version|-V)          echo "iiup $VERSION" ;;
-    health|list|ls)      cmd_status ;; # geri uyum: status’a yönlendir
-    init)                die "Kullan: iiup setup" ;;
-    *)                   err "Bilinmeyen komut: $cmd"; usage; exit 1 ;;
+    health|list|ls)      cmd_status ;;
+    init)                die "$(m "Use: iiup setup" "Kullan: iiup setup")" ;;
+    *)                   err "$(m "Unknown command:" "Bilinmeyen komut:") $cmd"; usage; exit 1 ;;
   esac
 }
 
