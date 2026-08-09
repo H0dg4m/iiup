@@ -1,0 +1,756 @@
+#!/usr/bin/env bash
+# iiup — end-4/dots-hyprland (illogical-impulse) güvenli güncelleyici
+# Akış: sürüm kontrol → (gerekirse) yedekle → güncelle → onayla → yedek sil
+set -euo pipefail
+
+VERSION="1.2.1"
+# Symlink üzerinden çalıştırılsa bile gerçek dosya yolunu bul
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "$SCRIPT_PATH")"
+
+# ─── Renk / log ───────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  C_RST=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YLW=$'\033[33m'; C_CYN=$'\033[36m'
+else
+  C_RST=; C_DIM=; C_BOLD=; C_RED=; C_GRN=; C_YLW=; C_CYN=
+fi
+
+log()  { printf '%s\n' "$*" >&2; }
+info() { printf "${C_CYN}==>${C_RST} %s\n" "$*" >&2; }
+ok()   { printf "${C_GRN}✓${C_RST} %s\n" "$*" >&2; }
+warn() { printf "${C_YLW}!${C_RST} %s\n" "$*" >&2; }
+err()  { printf "${C_RED}✗${C_RST} %s\n" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ─── Varsayılanlar (config ile override) ───────────────────────────────────────
+: "${XDG_CONFIG_HOME:=$HOME/.config}"
+: "${XDG_STATE_HOME:=$HOME/.local/state}"
+: "${XDG_CACHE_HOME:=$HOME/.cache}"
+
+IIUP_CONFIG_DIR="${IIUP_CONFIG_DIR:-$XDG_CONFIG_HOME/iiup}"
+IIUP_CONFIG="${IIUP_CONFIG:-$IIUP_CONFIG_DIR/config}"
+IIUP_STATE_DIR="${IIUP_STATE_DIR:-$XDG_STATE_HOME/iiup}"
+BACKUP_ROOT="${BACKUP_ROOT:-$IIUP_STATE_DIR/backups}"
+PENDING_FILE="${PENDING_FILE:-$IIUP_STATE_DIR/pending}"
+LOG_DIR="${LOG_DIR:-$IIUP_STATE_DIR/logs}"
+
+# Clone konumu (değiştirmek için ~/.config/iiup/config)
+REPO_DIR="${REPO_DIR:-$HOME/clone/dots-hyprland}"
+REPO_URL="${REPO_URL:-https://github.com/end-4/dots-hyprland.git}"
+REPO_BRANCH="${REPO_BRANCH:-main}"   # sabit tag için örn: 2026.05.11
+UPDATE_MODE="${UPDATE_MODE:-install}" # install | exp-update | exp-merge
+SETUP_ARGS="${SETUP_ARGS:---force --skip-allgreeting -s}"
+KEEP_FAILED_BACKUPS="${KEEP_FAILED_BACKUPS:-5}"
+NOTIFY="${NOTIFY:-1}"
+FORCE_UPDATE="${FORCE_UPDATE:-0}"  # 1 veya iiup update --force
+# systemd timer takvimi (örn: daily, *-*-* 10:00:00)
+CHECK_ON_CALENDAR="${CHECK_ON_CALENDAR:-daily}"
+UNIT_NAME="iiup-check"
+
+DEFAULT_BACKUP_PATHS=(
+  "$HOME/.config/hypr/custom"
+  "$HOME/.config/hypr/hyprland.lua"
+  "$HOME/.config/hypr/monitors.lua"
+  "$HOME/.config/hypr/monitors.conf"
+  "$HOME/.config/hypr/workspaces.lua"
+  "$HOME/.config/hypr/workspaces.conf"
+  "$HOME/.config/hypr/hypridle.conf"
+  "$HOME/.config/hypr/hyprlock.conf"
+  "$HOME/.config/illogical-impulse"
+  "$HOME/.updateignore"
+  "$HOME/.config/illogical-impulse/updateignore"
+)
+
+# ─── Yardımcılar ──────────────────────────────────────────────────────────────
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "'$1' bulunamadı."; }
+
+# notify [urgency] title body   — urgency: low|normal|critical (varsayılan normal)
+notify() {
+  [[ "$NOTIFY" == "1" ]] || return 0
+  command -v notify-send >/dev/null 2>&1 || return 0
+  local urgency="normal" title body
+  case "${1:-}" in
+    low|normal|critical) urgency="$1"; shift ;;
+  esac
+  title="${1:-iiup}"
+  body="${2:-}"
+  notify-send -a iiup -u "$urgency" -i software-update-available \
+    --hint=string:desktop-entry:iiup \
+    "$title" "$body" 2>/dev/null || true
+}
+
+ensure_dirs() {
+  mkdir -p "$IIUP_CONFIG_DIR" "$BACKUP_ROOT" "$LOG_DIR" "$IIUP_STATE_DIR"
+}
+
+load_config() {
+  if [[ -f "$IIUP_CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    source "$IIUP_CONFIG"
+  fi
+}
+
+write_default_config() {
+  ensure_dirs
+  if [[ -f "$IIUP_CONFIG" ]]; then
+    warn "Config zaten var: $IIUP_CONFIG"
+    return 0
+  fi
+  cat >"$IIUP_CONFIG" <<'EOF'
+# iiup config — isteğe göre düzenle
+
+# dots-hyprland clone yolu
+REPO_DIR="$HOME/clone/dots-hyprland"
+REPO_URL="https://github.com/end-4/dots-hyprland.git"
+
+# main veya sabit tag/branch (örn: 2026.05.11)
+REPO_BRANCH="main"
+
+# install | exp-update | exp-merge
+UPDATE_MODE="install"
+
+# ./setup'a giden ek argümanlar
+# -f/--force: onay sormadan
+# -s: pacman -Syu atla (sadece dots güncelle)
+# --skip-allgreeting: karşılama atla
+SETUP_ARGS="--force --skip-allgreeting -s"
+
+# Bildirim (notify-send)
+NOTIFY=1
+
+# Başarısız/onaylanmamış yedeklerden en fazla kaç tanesi tutulsun
+KEEP_FAILED_BACKUPS=5
+
+# Ek yedek yolları
+# BACKUP_EXTRA=(
+#   "$HOME/.config/kitty"
+#   "$HOME/.config/fish/config.fish"
+# )
+EOF
+  ok "Config yazıldı: $IIUP_CONFIG"
+}
+
+backup_path_list() {
+  local p
+  for p in "${DEFAULT_BACKUP_PATHS[@]}"; do
+    printf '%s\n' "$p"
+  done
+  if declare -p BACKUP_EXTRA >/dev/null 2>&1; then
+    for p in "${BACKUP_EXTRA[@]}"; do
+      printf '%s\n' "$p"
+    done
+  fi
+  if [[ -f "$IIUP_CONFIG_DIR/paths.list" ]]; then
+    while IFS= read -r p || [[ -n "$p" ]]; do
+      [[ -z "$p" || "$p" =~ ^[[:space:]]*# ]] && continue
+      p="${p/#\~/$HOME}"
+      eval "p=$p"
+      printf '%s\n' "$p"
+    done <"$IIUP_CONFIG_DIR/paths.list"
+  fi
+}
+
+stamp_now() { date +%Y%m%d-%H%M%S; }
+
+latest_pending() {
+  [[ -f "$PENDING_FILE" ]] || return 1
+  cat "$PENDING_FILE"
+}
+
+set_pending() { printf '%s\n' "$1" >"$PENDING_FILE"; }
+clear_pending() { rm -f "$PENDING_FILE"; }
+
+pretty_rev() {
+  local dir="${1:-$REPO_DIR}"
+  git -C "$dir" describe --tags --always --dirty 2>/dev/null \
+    || git -C "$dir" rev-parse --short HEAD 2>/dev/null \
+    || echo "bilinmiyor"
+}
+
+# ─── Repo + sürüm kontrolü ────────────────────────────────────────────────────
+ensure_repo() {
+  need_cmd git
+  if [[ ! -d "$REPO_DIR/.git" ]]; then
+    info "Repo yok, klonlanıyor:"
+    info "  $REPO_URL"
+    info "  → $REPO_DIR"
+    mkdir -p "$(dirname "$REPO_DIR")"
+    git clone --recursive "$REPO_URL" "$REPO_DIR"
+  fi
+  [[ -x "$REPO_DIR/setup" ]] || die "setup bulunamadı: $REPO_DIR/setup"
+}
+
+# Upstream'i fetch eder; stdout'a: local_sha remote_sha local_pretty remote_pretty
+# return 0 = güncel, 1 = güncelleme var, 2 = bilinmiyor/hata
+fetch_and_compare() {
+  ensure_repo
+  need_cmd git
+
+  info "Upstream kontrol ediliyor… ($REPO_BRANCH)"
+  (
+    cd "$REPO_DIR"
+    git remote set-url origin "$REPO_URL" 2>/dev/null || true
+    git fetch --tags --prune origin
+  )
+
+  local local_sha remote_sha local_pretty remote_pretty
+
+  local_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  local_pretty="$(pretty_rev "$REPO_DIR")"
+
+  if git -C "$REPO_DIR" show-ref --verify --quiet "refs/remotes/origin/$REPO_BRANCH"; then
+    remote_sha="$(git -C "$REPO_DIR" rev-parse "refs/remotes/origin/$REPO_BRANCH")"
+    remote_pretty="$(git -C "$REPO_DIR" describe --tags --always "refs/remotes/origin/$REPO_BRANCH" 2>/dev/null || echo "${remote_sha:0:7}")"
+  elif git -C "$REPO_DIR" rev-parse --verify "$REPO_BRANCH^{commit}" >/dev/null 2>&1; then
+    # tag / commit pin
+    remote_sha="$(git -C "$REPO_DIR" rev-parse "$REPO_BRANCH^{commit}")"
+    remote_pretty="$(git -C "$REPO_DIR" describe --tags --always "$REPO_BRANCH" 2>/dev/null || echo "${remote_sha:0:7}")"
+  else
+    warn "Branch/tag çözülemedi: $REPO_BRANCH"
+    printf '%s %s %s %s\n' "$local_sha" "unknown" "$local_pretty" "?"
+    return 2
+  fi
+
+  printf '%s %s %s %s\n' "$local_sha" "$remote_sha" "$local_pretty" "$remote_pretty"
+
+  if [[ "$local_sha" == "$remote_sha" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Kaç commit geride / ahead
+commit_distance() {
+  local local_sha="$1" remote_sha="$2"
+  local behind ahead
+  behind="$(git -C "$REPO_DIR" rev-list --count "${local_sha}..${remote_sha}" 2>/dev/null || echo "?")"
+  ahead="$(git -C "$REPO_DIR" rev-list --count "${remote_sha}..${local_sha}" 2>/dev/null || echo "?")"
+  printf '%s %s\n' "$behind" "$ahead"
+}
+
+cmd_check() {
+  load_config
+  ensure_dirs
+  ensure_repo
+
+  local cmp_out rc=0
+  cmp_out="$(fetch_and_compare)" || rc=$?
+  # shellcheck disable=SC2086
+  set -- $cmp_out
+  local local_sha="$1" remote_sha="$2" local_pretty="$3" remote_pretty="$4"
+
+  echo
+  echo "${C_BOLD}iiup check${C_RST}"
+  echo "clone:   $REPO_DIR"
+  echo "hedef:   $REPO_BRANCH"
+  echo "lokal:   $local_pretty  (${local_sha:0:10})"
+  echo "uzak:    $remote_pretty  (${remote_sha:0:10})"
+
+  if (( rc == 0 )); then
+    ok "Zaten son sürümdesin — güncelleme gerekmiyor."
+    return 0
+  elif (( rc == 2 )); then
+    warn "Karşılaştırma yapılamadı."
+    return 2
+  else
+    local dist behind ahead
+    dist="$(commit_distance "$local_sha" "$remote_sha")"
+    behind="${dist%% *}"
+    ahead="${dist##* }"
+    warn "Yeni sürüm var. ($behind commit geride, $ahead commit ileride)"
+    if [[ "$behind" != "?" && "$behind" -gt 0 ]]; then
+      info "Son gelenler:"
+      git -C "$REPO_DIR" log --oneline -5 "${local_sha}..${remote_sha}" >&2 || true
+    fi
+    printf "Güncellemek için: ${C_GRN}iiup update${C_RST}\n" >&2
+    notify critical "illogical-impulse güncellemesi var" \
+      "$local_pretty → $remote_pretty  ($behind commit). Çalıştır: iiup update"
+    return 1
+  fi
+}
+
+# Timer için sessiz kontrol: sadece güncelleme varsa bildir
+cmd_watch() {
+  load_config
+  ensure_dirs
+  local logfile="$LOG_DIR/watch-$(date +%Y%m%d).log"
+  {
+    echo "---- $(date -Iseconds) ----"
+  } >>"$logfile"
+
+  if [[ ! -d "$REPO_DIR/.git" ]]; then
+    echo "klon yok, atlanıyor" >>"$logfile"
+    return 0
+  fi
+
+  local cmp_out rc=0
+  cmp_out="$(fetch_and_compare 2>>"$logfile")" || rc=$?
+  # shellcheck disable=SC2086
+  set -- $cmp_out
+  local local_sha="${1:-}" remote_sha="${2:-}" local_pretty="${3:-}" remote_pretty="${4:-}"
+
+  {
+    echo "rc=$rc local=$local_pretty remote=$remote_pretty"
+  } >>"$logfile"
+
+  if (( rc == 1 )); then
+    local dist behind
+    dist="$(commit_distance "$local_sha" "$remote_sha")"
+    behind="${dist%% *}"
+    notify critical "illogical-impulse güncellemesi var" \
+      "$local_pretty → $remote_pretty ($behind commit). Çalıştır: iiup update"
+    echo "notify: update available" >>"$logfile"
+  fi
+  return 0
+}
+
+systemd_dir() { printf '%s\n' "$HOME/.config/systemd/user"; }
+
+write_systemd_units() {
+  local dir bin cal
+  dir="$(systemd_dir)"
+  # Her zaman gerçek script yolu (symlink döngüsüne düşme)
+  bin="$SCRIPT_PATH"
+  [[ -x "$bin" ]] || die "iiup script bulunamadı: $bin"
+  cal="${CHECK_ON_CALENDAR:-daily}"
+  mkdir -p "$dir"
+
+  cat >"$dir/${UNIT_NAME}.service" <<EOF
+[Unit]
+Description=iiup — dots-hyprland güncelleme kontrolü
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$bin watch
+Nice=10
+EOF
+
+  cat >"$dir/${UNIT_NAME}.timer" <<EOF
+[Unit]
+Description=iiup — günde bir güncelleme kontrolü
+
+[Timer]
+OnCalendar=$cal
+Persistent=true
+RandomizedDelaySec=10m
+Unit=${UNIT_NAME}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+cmd_enable_timer() {
+  load_config
+  ensure_dirs
+  need_cmd systemctl
+  cmd_install_link
+  write_systemd_units
+  systemctl --user daemon-reload
+  systemctl --user enable --now "${UNIT_NAME}.timer"
+  ok "Günlük kontrol açıldı (${CHECK_ON_CALENDAR})."
+  systemctl --user status "${UNIT_NAME}.timer" --no-pager || true
+  info "Sonraki çalıştırma:"
+  systemctl --user list-timers "${UNIT_NAME}.timer" --no-pager || true
+  info "Test: iiup watch   |   Manuel: systemctl --user start ${UNIT_NAME}.service"
+}
+
+cmd_disable_timer() {
+  need_cmd systemctl
+  systemctl --user disable --now "${UNIT_NAME}.timer" 2>/dev/null || true
+  ok "Günlük kontrol kapatıldı."
+}
+
+timer_status_line() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "timer:   (systemctl yok)"
+    return
+  fi
+  if systemctl --user is-enabled "${UNIT_NAME}.timer" >/dev/null 2>&1; then
+    local next
+    next="$(systemctl --user show "${UNIT_NAME}.timer" -p NextElapseUSecRealtime --value 2>/dev/null || echo "?")"
+    echo "timer:   ${C_GRN}açık${C_RST} ($CHECK_ON_CALENDAR)  sonraki: $next"
+  else
+    echo "timer:   kapalı  →  iiup enable-timer"
+  fi
+}
+
+repo_update() {
+  ensure_repo
+  info "Repo güncelleniyor ($REPO_BRANCH)…"
+  (
+    cd "$REPO_DIR"
+    if [[ -n "$(git status --porcelain)" ]]; then
+      warn "Repo kirli; stash alınıyor."
+      git stash push -u -m "iiup-auto-$(stamp_now)" || true
+    fi
+    if git show-ref --verify --quiet "refs/remotes/origin/$REPO_BRANCH"; then
+      git checkout "$REPO_BRANCH"
+      git pull --ff-only origin "$REPO_BRANCH"
+    elif git rev-parse --verify "$REPO_BRANCH^{commit}" >/dev/null 2>&1; then
+      git checkout --detach "$REPO_BRANCH"
+    else
+      die "Branch/tag bulunamadı: $REPO_BRANCH"
+    fi
+    if [[ -f .gitmodules ]]; then
+      git submodule update --init --recursive
+    fi
+  )
+  ok "Repo güncel: $(pretty_rev)"
+}
+
+# ─── Yedek ────────────────────────────────────────────────────────────────────
+do_backup() {
+  local stamp="${1:-$(stamp_now)}"
+  local dest="$BACKUP_ROOT/$stamp"
+  local manifest="$dest/MANIFEST.txt"
+  local count=0
+
+  ensure_dirs
+  mkdir -p "$dest/files"
+
+  info "Yedek alınıyor → $dest"
+  {
+    echo "stamp=$stamp"
+    echo "date=$(date -Iseconds)"
+    echo "host=$(hostname 2>/dev/null || echo unknown)"
+    echo "user=${USER:-$(id -un)}"
+    echo "hyprland=$(hyprctl version 2>/dev/null | head -1 || echo n/a)"
+    echo "repo=$(pretty_rev)"
+  } >"$manifest"
+
+  while IFS= read -r src; do
+    [[ -e "$src" ]] || continue
+    local rel="${src#"$HOME"/}"
+    local target="$dest/files/$rel"
+    mkdir -p "$(dirname "$target")"
+    if [[ -d "$src" ]]; then
+      cp -a "$src" "$(dirname "$target")/"
+    else
+      cp -a "$src" "$target"
+    fi
+    echo "OK $rel" >>"$manifest"
+    count=$((count + 1))
+  done < <(backup_path_list | awk 'NF && !seen[$0]++')
+
+  (
+    cd "$BACKUP_ROOT"
+    tar -C "$stamp/files" -czf "$stamp.tar.gz" .
+  )
+  printf 'archive=%s.tar.gz\n' "$stamp" >>"$manifest"
+  printf 'file_count=%s\n' "$count" >>"$manifest"
+
+  ok "Yedek tamam ($count öğe): $dest"
+  printf '%s\n' "$stamp"
+}
+
+do_restore() {
+  local stamp="${1:-}"
+  if [[ -z "$stamp" ]]; then
+    stamp="$(latest_pending 2>/dev/null || true)"
+  fi
+  [[ -n "$stamp" ]] || die "Hangi yedek? Kullanım: iiup restore <stamp|latest>"
+  [[ "$stamp" == "latest" ]] && stamp="$(ls -1 "$BACKUP_ROOT" | grep -E '^[0-9]{8}-' | sort | tail -1)"
+  local src_dir="$BACKUP_ROOT/$stamp/files"
+  [[ -d "$src_dir" ]] || die "Yedek yok: $stamp"
+
+  warn "Geri yükleme: $stamp → \$HOME"
+  if [[ -t 0 ]]; then
+    read -r -p "Devam? [y/N] " ans
+    [[ "$ans" =~ ^[yY]$ ]] || die "İptal."
+  fi
+
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a "$src_dir"/ "$HOME"/
+  else
+    cp -a "$src_dir"/. "$HOME"/
+  fi
+  ok "Geri yüklendi: $stamp"
+  notify "iiup" "Yedek geri yüklendi: $stamp"
+}
+
+delete_backup() {
+  local stamp="$1"
+  rm -rf "$BACKUP_ROOT/$stamp" "$BACKUP_ROOT/$stamp.tar.gz"
+  ok "Yedek silindi: $stamp"
+}
+
+prune_old_failed() {
+  local keep="${KEEP_FAILED_BACKUPS:-5}"
+  mapfile -t stamps < <(ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{8}-' | grep -v '\.tar\.gz$' | sort -r)
+  local i=0 pending
+  pending="$(latest_pending 2>/dev/null || true)"
+  for s in "${stamps[@]}"; do
+    [[ "$s" == "$pending" ]] && continue
+    i=$((i + 1))
+    if (( i > keep )); then
+      delete_backup "$s"
+    fi
+  done
+}
+
+# ─── Güncelleme ───────────────────────────────────────────────────────────────
+run_setup() {
+  ensure_repo
+  local mode="$UPDATE_MODE"
+  local logfile="$LOG_DIR/update-$(stamp_now).log"
+  info "Güncelleme başlıyor: ./setup $mode $SETUP_ARGS"
+  info "Log: $logfile"
+
+  # shellcheck disable=SC2086
+  (
+    cd "$REPO_DIR"
+    if [[ "$(id -u)" -eq 0 ]]; then
+      die "iiup root olarak çalışmamalı (dots-hyprland de root istemiyor)."
+    fi
+    ./setup "$mode" $SETUP_ARGS
+  ) 2>&1 | tee "$logfile"
+
+  ok "setup bitti"
+}
+
+health_check() {
+  local failed=0
+  info "Sağlık kontrolü…"
+
+  if ! command -v hyprctl >/dev/null 2>&1; then
+    warn "hyprctl yok — Hyprland oturumu dışında olabilirsin."
+  else
+    if hyprctl version >/dev/null 2>&1; then
+      ok "Hyprland yanıt veriyor"
+    else
+      warn "hyprctl yanıt vermiyor (oturum yoksa normal)"
+      failed=$((failed + 1))
+    fi
+  fi
+
+  [[ -d "$HOME/.config/hypr/custom" ]] && ok "hypr/custom duruyor" || { warn "hypr/custom eksik"; failed=$((failed + 1)); }
+  [[ -f "$HOME/.config/illogical-impulse/config.json" ]] && ok "config.json duruyor" || { warn "config.json eksik"; failed=$((failed + 1)); }
+  [[ -d "$HOME/.config/quickshell/ii" ]] && ok "quickshell/ii var" || warn "quickshell/ii yok"
+
+  if [[ -d "$HOME/.config/hypr/custom/scripts" ]]; then
+    ok "custom/scripts duruyor"
+  fi
+
+  return "$failed"
+}
+
+cmd_update() {
+  ensure_dirs
+  load_config
+
+  # --force flag
+  for a in "$@"; do
+    case "$a" in
+      -f|--force) FORCE_UPDATE=1 ;;
+    esac
+  done
+
+  if [[ -f "$PENDING_FILE" ]]; then
+    warn "Önceki güncelleme hâlâ onay bekliyor: $(cat "$PENDING_FILE")"
+    warn "Sorun yoksa:  iiup ok"
+    warn "Geri almak için: iiup restore"
+    if [[ -t 0 ]]; then
+      read -r -p "Yine de yeni güncelleme yapılsın mı? [y/N] " ans
+      [[ "$ans" =~ ^[yY]$ ]] || die "İptal."
+    else
+      die "Pending yedek var. Önce 'iiup ok' veya 'iiup restore'."
+    fi
+  fi
+
+  # Sürüm kontrolü — güncelse çık
+  local cmp_out rc=0
+  cmp_out="$(fetch_and_compare)" || rc=$?
+  # shellcheck disable=SC2086
+  set -- $cmp_out
+  local local_sha="$1" remote_sha="$2" local_pretty="$3" remote_pretty="$4"
+
+  info "Lokal: $local_pretty"
+  info "Uzak:  $remote_pretty"
+
+  if (( rc == 0 )) && [[ "$FORCE_UPDATE" != "1" ]]; then
+    ok "Zaten son sürümdesin — yedek/kurulum atlandı."
+    printf "Zorla yenilemek için: ${C_DIM}iiup update --force${C_RST}\n" >&2
+    notify "iiup" "Zaten güncel ($local_pretty)"
+    return 0
+  fi
+
+  if (( rc == 0 )) && [[ "$FORCE_UPDATE" == "1" ]]; then
+    warn "Zaten güncel, ama --force ile devam ediliyor."
+  elif (( rc == 1 )); then
+    local dist behind
+    dist="$(commit_distance "$local_sha" "$remote_sha")"
+    behind="${dist%% *}"
+    info "Güncelleme var ($behind commit geride) → devam."
+  fi
+
+  local stamp
+  stamp="$(do_backup)"
+  set_pending "$stamp"
+  ok "Pending yedek: $stamp"
+
+  repo_update
+
+  local setup_rc=0
+  run_setup || setup_rc=$?
+
+  if (( setup_rc != 0 )); then
+    err "Güncelleme başarısız (exit $setup_rc)."
+    err "Geri yüklemek için: iiup restore $stamp"
+    notify "iiup" "Güncelleme başarısız — yedek: $stamp"
+    exit "$setup_rc"
+  fi
+
+  local health_rc=0
+  health_check || health_rc=$?
+
+  echo
+  info "Güncelleme tamam. Yedek silinmedi."
+  if (( health_rc == 0 )); then
+    ok "Otomatik kontroller temiz görünüyor."
+  else
+    warn "Bazı kontroller uyarı verdi ($health_rc)."
+  fi
+  echo
+  printf "${C_BOLD}Hyprland/Quickshell'i bir süre kullan.${C_RST}\n"
+  printf "Sorun yoksa:\n  ${C_GRN}iiup ok${C_RST}\n"
+  printf "Bir şey bozulduysa:\n  ${C_YLW}iiup restore${C_RST}\n"
+  echo
+  notify "iiup" "Güncelleme bitti. Sorun yoksa: iiup ok"
+}
+
+cmd_ok() {
+  load_config
+  ensure_dirs
+  local stamp
+  stamp="$(latest_pending 2>/dev/null || true)"
+  [[ -n "$stamp" ]] || die "Onay bekleyen yedek yok. (Zaten temiz veya hiç güncelleme yapılmadı.)"
+
+  info "Son güncellemeyi onaylıyorsun → yedek silinecek: $stamp"
+  if [[ -t 0 ]]; then
+    read -r -p "Silinsin mi? [y/N] " ans
+    [[ "$ans" =~ ^[yY]$ ]] || die "İptal — yedek duruyor."
+  fi
+
+  delete_backup "$stamp"
+  clear_pending
+  prune_old_failed
+  ok "Onaylandı, yedek temizlendi."
+  notify "iiup" "Yedek temizlendi — sistem stabil"
+}
+
+cmd_status() {
+  load_config
+  ensure_dirs
+  echo "${C_BOLD}iiup${C_RST} v$VERSION"
+  echo "config:  $IIUP_CONFIG"
+  echo "clone:   $REPO_DIR"
+  echo "url:     $REPO_URL"
+  echo "hedef:   $REPO_BRANCH"
+  if [[ -d "$REPO_DIR/.git" ]]; then
+    echo "rev:     $(pretty_rev)"
+    echo "branch:  $(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  else
+    echo "rev:     (klon yok — ilk update'te oluşturulur)"
+  fi
+  echo "mode:    $UPDATE_MODE"
+  echo "backups: $BACKUP_ROOT"
+  timer_status_line
+  if [[ -f "$PENDING_FILE" ]]; then
+    echo "pending: ${C_YLW}$(cat "$PENDING_FILE")${C_RST}  →  iiup ok | iiup restore"
+  else
+    echo "pending: (yok)"
+  fi
+  echo
+  echo "Mevcut yedekler:"
+  local found=0
+  while IFS= read -r s; do
+    found=1
+    local mark="" meta=""
+    [[ -f "$PENDING_FILE" && "$(cat "$PENDING_FILE")" == "$s" ]] && mark=" ${C_YLW}[pending]${C_RST}"
+    [[ -f "$BACKUP_ROOT/$s/MANIFEST.txt" ]] && meta=" ($(grep -E '^file_count=' "$BACKUP_ROOT/$s/MANIFEST.txt" | cut -d= -f2) dosya)"
+    printf '  - %s%s%s\n' "$s" "$meta" "$mark"
+  done < <(ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{8}-' | grep -v '\.tar\.gz$' | sort -r | head -20)
+  (( found )) || echo "  (boş)"
+}
+
+cmd_list() {
+  load_config
+  ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{8}-' | grep -v '\.tar\.gz$' | sort -r
+}
+
+usage() {
+  cat <<EOF
+${C_BOLD}iiup${C_RST} v$VERSION — illogical-impulse / dots-hyprland güvenli güncelleyici
+
+Kullanım:
+  iiup check           Upstream'te yeni sürüm var mı bak (güncellemez)
+  iiup watch           Sessiz kontrol — sadece güncelleme varsa bildir (timer)
+  iiup update          Gerekirse yedek al → çek → ./setup
+  iiup update --force  Zaten güncel olsa bile kurulumu yenile
+  iiup ok              Güncelleme sorunsuz → pending yedeği sil
+  iiup restore [id]    Yedeği geri yükle (varsayılan: pending)
+  iiup backup          Sadece yedek al
+  iiup status          Durum / clone yolu / timer / yedekler
+  iiup list            Yedek stamp listesi
+  iiup enable-timer    Günde 1 kez otomatik kontrol aç
+  iiup disable-timer   Otomatik kontrolü kapat
+  iiup init            Varsayılan config yaz
+  iiup install-link    ~/.local/bin/iiup symlink kur
+  iiup health          Sağlık kontrolü
+  iiup help            Bu yardım
+
+Akış:
+  1) iiup enable-timer   (bir kez)
+  2) Bildirim gelince → iiup update
+  3) Sorun yoksa → iiup ok   |  sorun varsa → iiup restore
+
+Clone yolu: ${REPO_DIR}
+Config:     ${IIUP_CONFIG:-$HOME/.config/iiup/config}
+Timer:      ${CHECK_ON_CALENDAR:-daily}
+EOF
+}
+
+cmd_install_link() {
+  local target="$HOME/.local/bin/iiup"
+  mkdir -p "$HOME/.local/bin"
+  # Eski bozuk (kendine dönen) symlink'i temizle, gerçek dosyaya bağla
+  rm -f "$target"
+  ln -sfn "$SCRIPT_PATH" "$target"
+  rm -f "$HOME/.local/bin/otogun" "$HOME/.local/bin/taze"
+  ok "Symlink: $target → $SCRIPT_PATH"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) warn "~/.local/bin PATH'te değil; fish/zsh config'ine ekle." ;;
+  esac
+}
+
+# ─── main ─────────────────────────────────────────────────────────────────────
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    check|outdated)  load_config; cmd_check "$@" ;;
+    watch)           load_config; cmd_watch "$@" ;;
+    update|up)       load_config; cmd_update "$@" ;;
+    ok|confirm|done) load_config; cmd_ok "$@" ;;
+    restore)         load_config; do_restore "${1:-}" ;;
+    backup)          load_config; do_backup ;;
+    status|st)       cmd_status ;;
+    list|ls)         cmd_list ;;
+    enable-timer|timer-on)   cmd_enable_timer ;;
+    disable-timer|timer-off) cmd_disable_timer ;;
+    init)            write_default_config ;;
+    install-link)    cmd_install_link ;;
+    health)          load_config; health_check ;;
+    help|-h|--help)  load_config; usage ;;
+    version|-V)      echo "iiup $VERSION" ;;
+    *)               err "Bilinmeyen komut: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

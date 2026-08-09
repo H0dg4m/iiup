@@ -1,0 +1,5 @@
+# iiup ekstra yedek yolları (isteğe bağlı)
+# Satır başına bir yol; ~ ve $HOME kullanılabilir.
+
+# $HOME/.config/kitty
+# $HOME/.config/fish/config.fish
