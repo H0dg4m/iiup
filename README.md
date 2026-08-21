@@ -107,9 +107,13 @@ UPDATE_CMD="./install.sh"   # or ""
 |---|---|
 | App | `~/.local/share/iiup/` |
 | Command | `~/.local/bin/iiup` |
+| Icon | `~/.local/share/icons/hicolor/*/apps/iiup.png` |
+| Desktop entry | `~/.local/share/applications/iiup.desktop` |
 | Config | `~/.config/iiup/config` |
 | Backup list | `~/.config/iiup/paths.list` |
 | Backups / logs | `~/.local/state/iiup/` |
+
+`iiup install-link` also installs the app icon used in desktop notifications.
 
 ---
 

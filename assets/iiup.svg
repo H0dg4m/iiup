@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="iiup">
+  <rect width="128" height="128" rx="28" fill="#1A1D23"/>
+  <!-- upward update mark -->
+  <path d="M64 26 L98 64 H82 V82 H46 V64 H30 Z" fill="#3ECFBF"/>
+  <!-- stylized ii -->
+  <circle cx="52" cy="92" r="5" fill="#E8EEF2"/>
+  <circle cx="76" cy="92" r="5" fill="#E8EEF2"/>
+  <rect x="47" y="100" width="10" height="18" rx="3" fill="#E8EEF2"/>
+  <rect x="71" y="100" width="10" height="18" rx="3" fill="#E8EEF2"/>
+</svg>

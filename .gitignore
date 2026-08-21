@@ -3,3 +3,7 @@
 *.log
 *~
 .DS_Store
+
+# Generated icon sizes (SVG is source of truth)
+assets/iiup-*.png
+assets/iiup-512.png

@@ -3,7 +3,7 @@
 # Flow: setup → check → update → ok | restore
 set -euo pipefail
 
-VERSION="2.2.0"
+VERSION="2.2.1"
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "$SCRIPT_PATH")"
@@ -106,18 +106,98 @@ UNIT_NAME="iiup-check"
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "$(m "'$1' not found." "'$1' bulunamadı.")"; }
 
+resolve_icon() {
+  # Prefer absolute path so notifications always show a logo
+  if [[ -n "${IIUP_ICON:-}" && -e "$IIUP_ICON" ]]; then
+    printf '%s\n' "$IIUP_ICON"
+    return
+  fi
+  local p
+  for p in \
+    "$HOME/.local/share/icons/hicolor/128x128/apps/iiup.png" \
+    "$HOME/.local/share/icons/hicolor/64x64/apps/iiup.png" \
+    "$HOME/.local/share/icons/hicolor/48x48/apps/iiup.png" \
+    "$HOME/.local/share/pixmaps/iiup.png" \
+    "$SCRIPT_DIR/assets/iiup-128.png" \
+    "$SCRIPT_DIR/assets/iiup.svg"
+  do
+    if [[ -f "$p" ]]; then
+      printf '%s\n' "$p"
+      return
+    fi
+  done
+  printf '%s\n' "iiup"
+}
+
 notify() {
   [[ "$NOTIFY" == "1" ]] || return 0
   command -v notify-send >/dev/null 2>&1 || return 0
-  local urgency="normal" title body
+  local urgency="normal" title body icon
   case "${1:-}" in
     low|normal|critical) urgency="$1"; shift ;;
   esac
   title="${1:-iiup}"
   body="${2:-}"
-  notify-send -a iiup -u "$urgency" -i software-update-available \
+  icon="$(resolve_icon)"
+  notify-send -a iiup -u "$urgency" -i "$icon" \
     --hint=string:desktop-entry:iiup \
     "$title" "$body" 2>/dev/null || true
+}
+
+install_desktop_assets() {
+  local src="$SCRIPT_DIR/assets" s d
+  [[ -f "$src/iiup.svg" ]] || return 0
+
+  mkdir -p "$HOME/.local/share/applications" \
+           "$HOME/.local/share/pixmaps" \
+           "$HOME/.local/share/icons/hicolor/scalable/apps"
+
+  cp -f "$src/iiup.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/iiup.svg"
+
+  if command -v rsvg-convert >/dev/null 2>&1; then
+    for s in 16 24 32 48 64 128 256 512; do
+      d="$HOME/.local/share/icons/hicolor/${s}x${s}/apps"
+      mkdir -p "$d"
+      rsvg-convert -w "$s" -h "$s" "$src/iiup.svg" -o "$d/iiup.png"
+      # keep repo assets in sync when writable
+      rsvg-convert -w "$s" -h "$s" "$src/iiup.svg" -o "$src/iiup-${s}.png" 2>/dev/null || true
+    done
+    cp -f "$HOME/.local/share/icons/hicolor/128x128/apps/iiup.png" \
+      "$HOME/.local/share/pixmaps/iiup.png"
+  elif [[ -f "$src/iiup-128.png" ]]; then
+    for s in 48 64 128 256; do
+      d="$HOME/.local/share/icons/hicolor/${s}x${s}/apps"
+      mkdir -p "$d"
+      if [[ -f "$src/iiup-${s}.png" ]]; then
+        cp -f "$src/iiup-${s}.png" "$d/iiup.png"
+      else
+        cp -f "$src/iiup-128.png" "$d/iiup.png"
+      fi
+    done
+    cp -f "$src/iiup-128.png" "$HOME/.local/share/pixmaps/iiup.png"
+  fi
+
+  cat >"$HOME/.local/share/applications/iiup.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=iiup
+GenericName=Dotfiles updater
+GenericName[tr]=Dotfiles güncelleyici
+Comment=Safe git-based dotfiles updater
+Comment[tr]=Git tabanlı güvenli dotfiles güncelleyici
+Exec=$HOME/.local/bin/iiup status
+Icon=iiup
+Terminal=true
+Categories=System;Utility;
+StartupNotify=false
+EOF
+
+  command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+    gtk-update-icon-cache -f "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+  command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+
+  ok "$(m "Icon + desktop entry installed" "Logo ve masaüstü girişi kuruldu")"
 }
 
 ensure_dirs() {
@@ -881,6 +961,7 @@ cmd_install_link() {
     *":$HOME/.local/bin:"*) ;;
     *) warn "$(m "~/.local/bin not in PATH" "~/.local/bin PATH'te değil")" ;;
   esac
+  install_desktop_assets
 }
 
 usage() {

@@ -1,7 +1,14 @@
 # Paths to back up before update (one per line)
 # Güncellemeden önce yedeklenecek yollar (satır başına bir)
-# ~ or $HOME allowed / kullanılabilir. Can be empty / boş bırakılabilir.
+# ~ or $HOME allowed / kullanılabilir.
 
+# Hyprland
 # $HOME/.config/hypr/custom
+
+# Fish — put custom aliases/functions in conf.d (survives dots-hyprland sync)
+# Özel alias/fonksiyonları conf.d içine koy (dots güncellemesinde silinmez)
+# $HOME/.config/fish/conf.d
+# $HOME/.config/fish/functions
+# $HOME/.config/fish/config.fish
+
 # $HOME/.config/kitty
-# $HOME/.config/fish
